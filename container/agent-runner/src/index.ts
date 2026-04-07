@@ -363,6 +363,7 @@ async function runQuery(
 
   let newSessionId: string | undefined;
   let lastAssistantUuid: string | undefined;
+  let lastAssistantText: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
 
@@ -435,6 +436,20 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+      // Extract text content blocks from this assistant message and remember
+      // them. The SDK's `result.result` field is sometimes empty when the
+      // upstream provider (e.g. OpenRouter via Bedrock) emits text and
+      // thinking blocks in an unexpected order — so collect text directly.
+      const msgContent = (message as { message?: { content?: unknown } }).message?.content;
+      if (Array.isArray(msgContent)) {
+        const textParts = msgContent
+          .filter((c): c is { type: string; text: string } =>
+            typeof c === 'object' && c !== null && (c as { type?: string }).type === 'text' && typeof (c as { text?: unknown }).text === 'string')
+          .map((c) => c.text);
+        if (textParts.length > 0) {
+          lastAssistantText = textParts.join('');
+        }
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
@@ -450,12 +465,14 @@ async function runQuery(
     if (message.type === 'result') {
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
-      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+      const finalText = textResult || lastAssistantText || null;
+      log(`Result #${resultCount}: subtype=${message.subtype}${finalText ? ` text=${finalText.slice(0, 200)}` : ''}`);
       writeOutput({
         status: 'success',
-        result: textResult || null,
+        result: finalText,
         newSessionId
       });
+      lastAssistantText = undefined;
     }
   }
 

@@ -50,6 +50,28 @@ export function startCredentialProxy(
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
         const body = Buffer.concat(chunks);
+
+        // Claude Code probes GET /v1/models/<id> to validate the model exists.
+        // OpenRouter returns 404 for that path (it only exposes /v1/models for
+        // listing), which Claude Code surfaces as "model doesn't exist". Fake a
+        // success response so the validation passes; the real /v1/messages call
+        // will still fail upstream if the model is genuinely unavailable.
+        const modelLookupMatch =
+          req.method === 'GET' && /^\/v1\/models\/(.+)$/.exec(req.url || '');
+        if (modelLookupMatch) {
+          const modelId = decodeURIComponent(modelLookupMatch[1]);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              id: modelId,
+              type: 'model',
+              display_name: modelId,
+              created_at: new Date().toISOString(),
+            }),
+          );
+          return;
+        }
+
         const headers: Record<string, string | number | string[] | undefined> =
           {
             ...(req.headers as Record<string, string>),
@@ -79,11 +101,16 @@ export function startCredentialProxy(
           }
         }
 
+        // Prepend any path component of the upstream base URL (e.g. OpenRouter
+        // lives under /api), since the SDK only knows about /v1/messages.
+        const basePath = upstreamUrl.pathname.replace(/\/$/, '');
+        const forwardedPath = basePath + (req.url || '');
+
         const upstream = makeRequest(
           {
             hostname: upstreamUrl.hostname,
             port: upstreamUrl.port || (isHttps ? 443 : 80),
-            path: req.url,
+            path: forwardedPath,
             method: req.method,
             headers,
           } as RequestOptions,
